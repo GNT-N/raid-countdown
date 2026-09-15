@@ -113,6 +113,9 @@ RaidCountdown/
 
 ## Configuration `.env`
 
+Un modèle vierge est fourni : `.env.example`. Copiez-le, renommez la copie
+en `.env`, puis remplissez les deux valeurs.
+
 Le fichier `.env` doit se trouver dans le même dossier que `bot.py` ou `RaidCountdown.exe`.
 
 ```env
@@ -179,21 +182,51 @@ python -m pip install pyinstaller
 
 ## Déploiement sur un autre serveur Discord
 
+Un bot en cours d'exécution ne dessert **qu'un seul serveur Discord** à la fois,
+celui désigné par `GUILD_ID`. Deux cas de figure selon le besoin.
+
+### Cas 1 — déplacer votre bot vers un autre serveur
+
+Vous gardez le même bot, il change simplement de serveur.
+
 1. Inviter le bot Discord sur le nouveau serveur.
 2. Activer le **Developer Mode** dans Discord.
 3. Clic droit sur le serveur.
 4. Cliquer sur **Copy Server ID / Copier l'identifiant du serveur**.
 5. Remplacer `GUILD_ID` dans `.env`.
-6. Lancer `RaidCountdown.exe`.
+6. Relancer `RaidCountdown.exe`.
 
-Exemple :
+Le token reste identique.
 
-```env
-DISCORD_TOKEN=YOUR_EXISTING_BOT_TOKEN
-GUILD_ID=123456789012345678
+### Cas 2 — une autre personne fait tourner le bot de son côté
+
+Elle doit créer **son propre bot Discord**, avec **son propre token**.
+
+> Ne lui transmettez jamais votre `.env`. Deux programmes lancés en même
+> temps avec le même token pilotent le même bot : chacun réécrit les mêmes
+> messages, les bases `raids.db` se désynchronisent et les commandes `/raid`
+> peuvent être traitées deux fois.
+
+Ce que vous lui envoyez :
+
+```text
+RaidCountdown.exe
+.env.example
 ```
 
-Le token peut rester identique si le même bot Discord est utilisé.
+Rien d'autre. Ni votre `.env`, ni votre `raids.db` : cette base contient
+vos raids, qui pointent vers des messages de *votre* serveur.
+
+Ce qu'elle fait de son côté :
+
+1. Créer une application sur <https://discord.com/developers/applications>.
+2. Onglet **Bot**, cliquer sur **Reset Token** et copier le token obtenu.
+3. Inviter ce bot sur son serveur, avec les permissions listées plus bas.
+4. Renommer `.env.example` en `.env` et y coller son token et son `GUILD_ID`.
+5. Lancer `RaidCountdown.exe`. La base `raids.db` se crée toute seule.
+
+Les deux bots sont alors totalement indépendants : changer ou supprimer
+l'un n'a aucun effet sur l'autre.
 
 ## Permissions nécessaires au bot
 
