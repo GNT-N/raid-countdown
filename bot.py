@@ -47,6 +47,14 @@ GUILD_ID = int(GUILD_ID_RAW)
 
 DATABASE_FILE = BASE_DIR / "raids.db"
 
+# Below this threshold the countdown shows the seconds
+# and is refreshed every second.
+SECONDS_PRECISION_THRESHOLD = 5 * 60
+
+# Above the threshold the displayed value only changes
+# once per minute.
+SLOW_REFRESH_SECONDS = 60
+
 # raid_id -> asyncio.Task
 running_tasks = {}
 
@@ -197,7 +205,12 @@ def get_guild_raids(
         return cursor.fetchall()
 
 
-def get_all_active_raids():
+def get_all_raids():
+    """
+    Every stored raid, including the ones that expired
+    while the bot was offline, so they can be closed
+    properly on the next start.
+    """
 
     with sqlite3.connect(DATABASE_FILE) as db:
 
@@ -211,11 +224,8 @@ def get_all_active_raids():
                 title,
                 timestamp
             FROM raids
-            WHERE timestamp > ?
-            """,
-            (
-                int(time.time()),
-            )
+            ORDER BY timestamp ASC
+            """
         )
 
         return cursor.fetchall()
@@ -240,7 +250,8 @@ def clean_old_raids():
 # ============================================================
 
 def format_remaining(
-    seconds: int
+    seconds: int,
+    with_seconds: bool = True
 ) -> str:
 
     seconds = max(
@@ -263,12 +274,16 @@ def format_remaining(
         60
     )
 
-    return (
+    text = (
         f"{days:02d}d "
         f"{hours:02d}h "
-        f"{minutes:02d}m "
-        f"{seconds:02d}s"
+        f"{minutes:02d}m"
     )
+
+    if with_seconds:
+        text += f" {seconds:02d}s"
+
+    return text
 
 
 def create_raid_embed(
@@ -283,20 +298,24 @@ def create_raid_embed(
         )
     )
 
+    # The seconds are only shown once they are refreshed
+    # every second, otherwise they would be stale.
+
+    remaining_text = format_remaining(
+        remaining_seconds,
+        with_seconds=(
+            remaining_seconds
+            <= SECONDS_PRECISION_THRESHOLD
+        )
+    )
+
     return discord.Embed(
         title=f"⚔️ {title}",
         description=(
-            f"📅 **Raid date:** "
-            f"<t:{timestamp}:F>\n"
-
-            f"🕒 **Starts:** "
-            f"<t:{timestamp}:R>\n\n"
-
+            f"📅 **Raid date:** <t:{timestamp}:F>\n"
+            f"🕒 **Starts:** <t:{timestamp}:R>\n\n"
             f"⏳ **Time remaining**\n"
-
-            f"# `"
-            f"{format_remaining(remaining_seconds)}"
-            f"`"
+            f"# `{remaining_text}`"
         )
     )
 
@@ -318,6 +337,41 @@ def create_finished_embed(
 # ============================================================
 # COUNTDOWN
 # ============================================================
+
+def refresh_delay(
+    remaining_seconds: int
+) -> int:
+    """
+    How long to wait before the next message edit.
+
+    Editing every second for days would blow past the
+    Discord message edit rate limit (roughly 5 edits per
+    5 s and per channel). Above the threshold the embed
+    no longer displays the seconds, so one edit per minute
+    is enough, and <t:...:R> keeps updating client side
+    for free in the meantime.
+    """
+
+    if remaining_seconds <= SECONDS_PRECISION_THRESHOLD:
+        return 1
+
+    # Wake up exactly when the displayed minute changes.
+
+    delay = (
+        remaining_seconds % 60
+        or SLOW_REFRESH_SECONDS
+    )
+
+    # Never sleep past the threshold, otherwise the switch
+    # to the second by second display would be skipped.
+
+    delay = min(
+        delay,
+        remaining_seconds - SECONDS_PRECISION_THRESHOLD
+    )
+
+    return max(delay, 1)
+
 
 async def countdown(
     raid_id: int,
@@ -372,17 +426,15 @@ async def countdown(
                     )
                 )
 
-
             except discord.NotFound:
 
-                # The message was manually deleted.
+                # Message was manually deleted.
 
                 delete_raid_from_database(
                     raid_id
                 )
 
                 return
-
 
             except discord.Forbidden:
 
@@ -392,7 +444,6 @@ async def countdown(
                 )
 
                 return
-
 
             except discord.HTTPException as error:
 
@@ -407,18 +458,33 @@ async def countdown(
 
 
             # =================================================
-            # NEXT SECOND
+            # NEXT REFRESH
             # =================================================
 
-            await asyncio.sleep(1)
+            await asyncio.sleep(
+                refresh_delay(
+                    remaining_seconds
+                )
+            )
 
 
     except asyncio.CancelledError:
 
-        # Normal behavior when /raid delete
-        # stops the countdown.
+        # Normal when /raid delete stops the countdown.
 
         return
+
+
+    except Exception as error:
+
+        # Without this the task would die silently and the
+        # countdown would stay frozen with no trace at all.
+
+        print(
+            f"❌ Countdown for raid #{raid_id} stopped "
+            f"unexpectedly: "
+            f"{type(error).__name__}: {error}"
+        )
 
 
     finally:
@@ -488,16 +554,19 @@ raid_group = app_commands.Group(
     name="create",
     description="Create a new raid countdown"
 )
+@app_commands.rename(
+    time_text="time"
+)
 @app_commands.describe(
     title="Example: Dungeon 1",
-    date="Format: DD/MM/YYYY",
-    time="Format: HH:MM"
+    date="Format: MM/DD/YYYY",
+    time_text="Format: HH:MM AM/PM"
 )
 async def raid_create(
     interaction: discord.Interaction,
     title: str,
     date: str,
-    time: str
+    time_text: str
 ):
 
     # ========================================================
@@ -534,13 +603,11 @@ async def raid_create(
         await interaction.response.send_message(
             "❌ I am missing permissions "
             "in this channel.\n\n"
-
             "I need:\n"
             "• View Channel\n"
             "• Send Messages\n"
             "• Embed Links\n"
             "• Read Message History",
-
             ephemeral=True
         )
 
@@ -554,8 +621,8 @@ async def raid_create(
     try:
 
         target = datetime.strptime(
-            f"{date} {time}",
-            "%d/%m/%Y %H:%M"
+            f"{date} {time_text.strip().upper()}",
+            "%m/%d/%Y %I:%M %p"
         )
 
         # Uses the local timezone of the machine
@@ -570,11 +637,10 @@ async def raid_create(
 
         await interaction.response.send_message(
             "❌ Invalid date or time format.\n\n"
-
             "Example:\n"
-            "`date: 20/08/2026`\n"
-            "`time: 20:00`",
-
+            "`date: 08/20/2026`\n"
+            "`time: 8:00 PM`\n\n"
+            "Use **AM** or **PM**.",
             ephemeral=True
         )
 
@@ -586,7 +652,7 @@ async def raid_create(
     # ========================================================
 
     if timestamp <= int(
-        time_module()
+        time.time()
     ):
 
         await interaction.response.send_message(
@@ -694,8 +760,8 @@ async def raid_create(
             await message.delete()
 
         except discord.HTTPException:
-
             pass
+
 
         await interaction.followup.send(
             "❌ Unable to display the countdown.",
@@ -947,9 +1013,7 @@ bot.tree.add_command(
 
 async def restore_raids():
 
-    clean_old_raids()
-
-    raids = get_all_active_raids()
+    raids = get_all_raids()
 
 
     if not raids:
@@ -967,6 +1031,9 @@ async def restore_raids():
     )
 
 
+    now = int(time.time())
+
+
     for raid in raids:
 
         (
@@ -977,6 +1044,13 @@ async def restore_raids():
             title,
             timestamp
         ) = raid
+
+
+        # The raid start time passed while the bot was
+        # offline: the message must still be closed
+        # instead of being left frozen mid countdown.
+
+        expired = timestamp <= now
 
 
         try:
@@ -996,6 +1070,27 @@ async def restore_raids():
             message = await channel.fetch_message(
                 message_id
             )
+
+
+            if expired:
+
+                await message.edit(
+                    embed=create_finished_embed(
+                        title,
+                        timestamp
+                    )
+                )
+
+                delete_raid_from_database(
+                    raid_id
+                )
+
+                print(
+                    f"⏰ Raid #{raid_id} started while "
+                    f"the bot was offline, message closed."
+                )
+
+                continue
 
 
             task = asyncio.create_task(
@@ -1041,6 +1136,12 @@ async def restore_raids():
             )
 
 
+    # Sweeps the expired raids whose message could not be
+    # reached above, so they do not pile up in the base.
+
+    clean_old_raids()
+
+
 # ============================================================
 # EVENTS
 # ============================================================
@@ -1058,20 +1159,6 @@ async def on_ready():
         bot.raids_restored = True
 
         await restore_raids()
-
-
-# ============================================================
-# SMALL HELPER
-# ============================================================
-
-def time_module():
-    """
-    Avoids conflict between the imported
-    time module and the /raid create
-    parameter named 'time'.
-    """
-
-    return time.time()
 
 
 # ============================================================

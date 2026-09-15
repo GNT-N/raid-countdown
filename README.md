@@ -7,7 +7,7 @@ Le bot affiche la date du raid selon le fuseau horaire local de chaque utilisate
 ## Fonctionnalités
 
 - Création d'un compte à rebours pour un raid
-- Affichage en temps réel jusqu'à la seconde
+- Compte à rebours en temps réel, à la seconde dans les 5 dernières minutes
 - Heure automatiquement adaptée au fuseau horaire de chaque utilisateur Discord
 - Liste des raids programmés
 - Suppression d'un raid
@@ -24,16 +24,16 @@ Crée un nouveau raid.
 
 Paramètres :
 - `title` : nom du raid
-- `date` : date au format `DD/MM/YYYY`
-- `time` : heure au format `HH:MM`
+- `date` : date au format `MM/DD/YYYY`
+- `time` : heure au format `HH:MM AM/PM`
 
 Exemple :
 
 ```text
 /raid create
 title: Dungeon 1
-date: 20/08/2026
-time: 20:00
+date: 08/20/2026
+time: 8:00 PM
 ```
 
 Permission requise : `Manage Server / Gérer le serveur`
@@ -67,6 +67,25 @@ raid_id: 12
 ```
 
 Permission requise : `Manage Server / Gérer le serveur`
+
+## Rafraîchissement du compte à rebours
+
+Le message Discord n'est pas réédité toutes les secondes : Discord limite le
+nombre de modifications d'un message (environ 5 par 5 secondes et par salon),
+et un raid créé une semaine à l'avance représenterait plus de 600 000 appels API.
+
+Le bot adapte donc sa cadence :
+
+| Temps restant | Affichage | Édition du message |
+|---|---|---|
+| plus de 5 minutes | `02d 04h 37m` | une fois par minute |
+| 5 minutes ou moins | `00d 00h 04m 59s` | toutes les secondes |
+
+Les secondes n'apparaissent qu'à partir de **T-5 minutes**, au moment où elles
+commencent réellement à être rafraîchies.
+
+En complément, la ligne `Starts:` utilise un horodatage relatif Discord, que
+chaque client met à jour tout seul en continu, sans aucun appel API.
 
 ## Fichiers
 
@@ -218,7 +237,10 @@ Si le bot est arrêté alors que des raids sont actifs :
 1. les messages restent sur Discord ;
 2. les raids restent enregistrés dans `raids.db` ;
 3. au prochain lancement, le bot retrouve les raids ;
-4. les comptes à rebours reprennent automatiquement au bon temps restant.
+4. les comptes à rebours reprennent automatiquement au bon temps restant ;
+5. si l'heure d'un raid est passée pendant la coupure, son message est
+   basculé sur **THE RAID STARTS NOW!** au lieu de rester figé sur un
+   compteur arbitraire.
 
 ## Fuseaux horaires
 
